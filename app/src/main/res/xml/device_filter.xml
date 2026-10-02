@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Universal catch-all for all Flight Controllers (MicoAir, Pixhawk, Cube, etc.) -->
+    <usb-device />
+
+    <!-- Specific Vendor IDs for Flight Controllers & Serial Adapters -->
+    <usb-device vendor-id="1155" /> <!-- STMicroelectronics / MicoAir / STM32 VCP (0x0483) -->
+    <usb-device vendor-id="11694" /> <!-- Hex / ProfiCNC Cube (0x2DAE) -->
+    <usb-device vendor-id="9900" /> <!-- 3DR Pixhawk (0x26AC) -->
+    <usb-device vendor-id="4617" /> <!-- ArduPilot Custom / OpenTX (0x1209) -->
+    <usb-device vendor-id="1027" /> <!-- FTDI (0x0403) -->
+    <usb-device vendor-id="4292" /> <!-- Silicon Labs CP210x (0x10C4) -->
+    <usb-device vendor-id="6790" /> <!-- QinHeng CH340/CH341 (0x1A86) -->
+    <usb-device vendor-id="1659" /> <!-- Prolific PL2303 (0x067B) -->
+    <usb-device vendor-id="1204" /> <!-- Cypress (0x04B4) -->
+    <usb-device vendor-id="5824" /> <!-- PJRC Teensy (0x16C0) -->
+    <usb-device vendor-id="11914" /> <!-- Raspberry Pi RP2040 (0x2E8A) -->
+    <usb-device vendor-id="12346" /> <!-- Espressif ESP32-S2/S3 (0x303A) -->
+
+    <!-- USB Device Classes -->
+    <usb-device class="2" /> <!-- USB CDC (Communication Device Class) -->
+    <usb-device class="10" /> <!-- USB CDC Data -->
+    <usb-device class="255" /> <!-- Vendor Specific Class -->
+</resources>
