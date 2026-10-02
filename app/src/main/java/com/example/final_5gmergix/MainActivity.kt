@@ -58,6 +58,13 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // Setup auto-stop trigger when USB FC disconnects
+        telemetryEngine.onUsbDisconnectedAutoTrigger = {
+            runOnUiThread {
+                stopFullAutoMission()
+            }
+        }
+
         // Request runtime permissions
         requestRequiredPermissions()
 
@@ -71,7 +78,8 @@ class MainActivity : ComponentActivity() {
                     cameraManager = cameraManager,
                     telemetryEngine = telemetryEngine,
                     pythonEngine = pythonEngine,
-                    onStartService = { startBackgroundService() }
+                    onStartService = { startBackgroundService() },
+                    onStopService = { stopBackgroundService() }
                 )
             }
         }
@@ -108,6 +116,15 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun stopBackgroundService() {
+        try {
+            val serviceIntent = Intent(this, MergixForegroundService::class.java)
+            stopService(serviceIntent)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
     /**
      * Completely hands-free auto mission start:
      * 1. Starts persistent foreground service
@@ -127,12 +144,30 @@ class MainActivity : ComponentActivity() {
         cameraManager.queueAutoStartStream(config.videoOutputLink)
     }
 
+    /**
+     * Completely hands-free auto mission stop when FC disconnects:
+     * 1. Stops video streaming
+     * 2. Stops telemetry bridge
+     * 3. Stops foreground service and clears notification
+     */
+    fun stopFullAutoMission() {
+        if (::cameraManager.isInitialized) {
+            cameraManager.stop5GVideoStream { _, _ -> }
+        }
+        if (::telemetryEngine.isInitialized) {
+            telemetryEngine.stopBridge()
+        }
+        stopBackgroundService()
+    }
+
     override fun onResume() {
         super.onResume()
         if (::telemetryEngine.isInitialized) {
             telemetryEngine.scanAndConnectUsb()
             if (telemetryEngine.isUsbConnected) {
                 startFullAutoMission()
+            } else if (!telemetryEngine.isBridgeRunning) {
+                stopBackgroundService()
             }
         }
     }
@@ -163,6 +198,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        stopFullAutoMission()
         cameraManager.shutdown()
         telemetryEngine.destroy()
     }

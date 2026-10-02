@@ -115,6 +115,7 @@ class TelemetryBridgeEngine(private val context: Context) {
     var onStatusUpdated: ((TelemetryStats) -> Unit)? = null
     var onLogMessage: ((String) -> Unit)? = null
     var onUsbConnectedAutoTrigger: (() -> Unit)? = null
+    var onUsbDisconnectedAutoTrigger: (() -> Unit)? = null
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context?, intent: Intent?) {
@@ -138,12 +139,13 @@ class TelemetryBridgeEngine(private val context: Context) {
                     }
                 }
                 UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
-                    log("[USB] Device attached event received")
+                    log("[USB] Flight Controller cable attached")
                     scanAndConnectUsb()
                 }
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
-                    log("[USB] Device detached")
+                    log("[USB] Flight Controller cable detached - stopping hardware link")
                     closeUsb()
+                    onUsbDisconnectedAutoTrigger?.invoke()
                 }
             }
         }

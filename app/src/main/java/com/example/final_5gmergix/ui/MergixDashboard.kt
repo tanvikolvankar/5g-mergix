@@ -68,7 +68,8 @@ fun MergixDashboard(
     cameraManager: CameraStreamManager,
     telemetryEngine: TelemetryBridgeEngine,
     pythonEngine: PythonRunnerEngine,
-    onStartService: () -> Unit
+    onStartService: () -> Unit,
+    onStopService: () -> Unit = {}
 ) {
     val context = LocalContext.current
     var selectedTab by remember { mutableStateOf(0) }
@@ -258,7 +259,8 @@ fun MergixDashboard(
                     },
                     telemetryStats = telemetryStats,
                     liveFps = liveFps,
-                    onStartService = onStartService
+                    onStartService = onStartService,
+                    onStopService = onStopService
                 )
                 1 -> TerminalTab(terminalLogs)
                 2 -> SettingsTab(
@@ -308,7 +310,8 @@ fun MissionControlTab(
     onVideoStreamingChange: (Boolean, String) -> Unit,
     telemetryStats: TelemetryStats,
     liveFps: Int,
-    onStartService: () -> Unit
+    onStartService: () -> Unit,
+    onStopService: () -> Unit = {}
 ) {
     val scrollState = rememberScrollState()
 
@@ -420,12 +423,15 @@ fun MissionControlTab(
             // Video Toggle Button
             Button(
                 onClick = {
-                    onStartService()
                     if (isStreamingVideo) {
                         cameraManager.stop5GVideoStream { active, msg ->
                             onVideoStreamingChange(active, msg)
                         }
+                        if (telemetryStats.state == BridgeState.IDLE) {
+                            onStopService()
+                        }
                     } else {
+                        onStartService()
                         cameraManager.start5GVideoStream(config.videoOutputLink) { active, msg ->
                             onVideoStreamingChange(active, msg)
                         }
@@ -454,10 +460,13 @@ fun MissionControlTab(
             val isTelemActive = telemetryStats.state != BridgeState.IDLE
             Button(
                 onClick = {
-                    onStartService()
                     if (isTelemActive) {
                         telemetryEngine.stopBridge()
+                        if (!isStreamingVideo) {
+                            onStopService()
+                        }
                     } else {
+                        onStartService()
                         telemetryEngine.startBridge(config)
                     }
                 },
