@@ -159,7 +159,6 @@ class TelemetryBridgeEngine(private val context: Context) {
         } else {
             context.registerReceiver(usbReceiver, filter)
         }
-        startUsbAutoScanner()
     }
 
     private fun log(message: String) {
@@ -416,9 +415,17 @@ class TelemetryBridgeEngine(private val context: Context) {
                         }
 
                         val now = System.currentTimeMillis()
-                        if (now - lastUiUpdate > 250) {
+                        if (now - lastUiUpdate > 1000) {
                             lastUiUpdate = now
                             notifyStats()
+                        }
+                    } else {
+                        // CRITICAL: When no serial bytes are ready, sleep 10ms to yield CPU.
+                        // This prevents 100% CPU core spinning, drastically cools the phone, and saves battery.
+                        try {
+                            Thread.sleep(10)
+                        } catch (_: InterruptedException) {
+                            break
                         }
                     }
                 } catch (e: Exception) {
