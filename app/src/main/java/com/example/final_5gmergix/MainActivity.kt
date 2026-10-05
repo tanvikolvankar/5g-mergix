@@ -140,8 +140,8 @@ class MainActivity : ComponentActivity() {
             telemetryEngine.startBridge(config)
         }
 
-        // 2. Start Video Stream to Cloud RTSP Port 8554
-        cameraManager.queueAutoStartStream(config.videoOutputLink)
+        // 2. Start Video Stream to Cloud RTSP Port 8554 (with Ethernet Camera auto-detection)
+        cameraManager.queueAutoStartStream(config.videoOutputLink, config.videoInputLink)
     }
 
     /**

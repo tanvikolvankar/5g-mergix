@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.example.final_5gmergix.BridgeState
 import com.example.final_5gmergix.CameraStreamManager
+import com.example.final_5gmergix.VideoSource
 import com.example.final_5gmergix.MergixConfig
 import com.example.final_5gmergix.MergixConfigManager
 import com.example.final_5gmergix.PythonRunnerEngine
@@ -79,6 +80,7 @@ fun MergixDashboard(
 
     // Video Streaming State
     var isStreamingVideo by remember { mutableStateOf(cameraManager.isStreaming) }
+    var activeVideoSource by remember { mutableStateOf(cameraManager.activeSource) }
     var videoStatusText by remember { mutableStateOf("Camera Ready") }
     var liveFps by remember { mutableStateOf(0) }
 
@@ -111,6 +113,17 @@ fun MergixDashboard(
             isStreamingVideo = active
             videoStatusText = msg
         }
+        cameraManager.onVideoSourceChanged = { src, label ->
+            activeVideoSource = src
+            val timestamp = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+            if (terminalLogs.size > 200) terminalLogs.removeAt(0)
+            terminalLogs.add("[$timestamp] [VIDEO-SOURCE] Active: $label")
+        }
+        cameraManager.onLogMessage = { msg ->
+            val timestamp = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+            if (terminalLogs.size > 200) terminalLogs.removeAt(0)
+            terminalLogs.add("[$timestamp] $msg")
+        }
         telemetryEngine.onStatusUpdated = { stats -> telemetryStats = stats }
         telemetryEngine.onLogMessage = { msg ->
             val timestamp = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
@@ -120,6 +133,8 @@ fun MergixDashboard(
         onDispose {
             cameraManager.onFpsUpdate = null
             cameraManager.onStreamStateChanged = null
+            cameraManager.onVideoSourceChanged = null
+            cameraManager.onLogMessage = null
             telemetryEngine.onStatusUpdated = null
             telemetryEngine.onLogMessage = null
         }
@@ -177,11 +192,11 @@ fun MergixDashboard(
                             inactiveColor = if (telemetryStats.isCloudConnected) WarningAmber else MutedText
                         )
                         Spacer(Modifier.width(6.dp))
-                        // Video Status
+                        // Video / Camera Source Status Pill
                         StatusPill(
-                            label = "VIDEO",
+                            label = if (activeVideoSource == VideoSource.ETHERNET_CAMERA) "CAM: ETH" else "CAM: PHONE",
                             active = isStreamingVideo,
-                            activeColor = CriticalRed,
+                            activeColor = if (activeVideoSource == VideoSource.ETHERNET_CAMERA) ActiveGreen else CriticalRed,
                             inactiveColor = MutedText
                         )
                     }
@@ -259,6 +274,7 @@ fun MergixDashboard(
                     },
                     telemetryStats = telemetryStats,
                     liveFps = liveFps,
+                    activeVideoSource = activeVideoSource,
                     onStartService = onStartService,
                     onStopService = onStopService
                 )
@@ -310,6 +326,7 @@ fun MissionControlTab(
     onVideoStreamingChange: (Boolean, String) -> Unit,
     telemetryStats: TelemetryStats,
     liveFps: Int,
+    activeVideoSource: VideoSource,
     onStartService: () -> Unit,
     onStopService: () -> Unit = {}
 ) {
@@ -375,23 +392,89 @@ fun MissionControlTab(
                     )
                 }
 
-                // Top Floating Badge: Switch Camera
-                IconButton(
-                    onClick = {
-                        // Will flip facing when using switchCamera
-                    },
+                // Top Floating Source Badge
+                Row(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
                         .padding(8.dp)
-                        .background(DarkBg.copy(alpha = 0.75f), CircleShape)
-                        .size(36.dp)
+                        .background(DarkBg.copy(alpha = 0.85f), RoundedCornerShape(8.dp))
+                        .border(
+                            1.dp,
+                            if (activeVideoSource == VideoSource.ETHERNET_CAMERA) ActiveGreen.copy(alpha = 0.7f) else ElectricBlue.copy(alpha = 0.7f),
+                            RoundedCornerShape(8.dp)
+                        )
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        Icons.Default.Cameraswitch,
-                        contentDescription = "Switch Camera",
-                        tint = NeonCyan,
-                        modifier = Modifier.size(20.dp)
+                    Box(
+                        modifier = Modifier
+                            .size(7.dp)
+                            .clip(CircleShape)
+                            .background(if (activeVideoSource == VideoSource.ETHERNET_CAMERA) ActiveGreen else NeonCyan)
                     )
+                    Spacer(Modifier.width(5.dp))
+                    Text(
+                        if (activeVideoSource == VideoSource.ETHERNET_CAMERA) "ETHERNET (SIYI)" else "PHONE CAM",
+                        color = if (activeVideoSource == VideoSource.ETHERNET_CAMERA) ActiveGreen else LightText,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                // Overlay when Ethernet Camera is Active & Relaying
+                if (activeVideoSource == VideoSource.ETHERNET_CAMERA && isStreamingVideo) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(DarkBg.copy(alpha = 0.90f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier.padding(16.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.Router,
+                                contentDescription = null,
+                                tint = ActiveGreen,
+                                modifier = Modifier.size(40.dp)
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                "ETHERNET CAMERA RELAY ACTIVE",
+                                color = ActiveGreen,
+                                fontWeight = FontWeight.Black,
+                                fontSize = 13.sp
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "IN: ${config.videoInputLink}",
+                                color = MutedText,
+                                fontSize = 10.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                            Text(
+                                "OUT: ${config.videoOutputLink}",
+                                color = NeonCyan,
+                                fontSize = 10.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = ActiveGreen.copy(alpha = 0.15f),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, ActiveGreen.copy(alpha = 0.4f))
+                            ) {
+                                Text(
+                                    "ZERO-CPU 5G RELAY",
+                                    color = ActiveGreen,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                    }
                 }
 
                 // Bottom Overlay: RTSP Endpoint
@@ -432,7 +515,7 @@ fun MissionControlTab(
                         }
                     } else {
                         onStartService()
-                        cameraManager.start5GVideoStream(config.videoOutputLink) { active, msg ->
+                        cameraManager.start5GVideoStream(config.videoOutputLink, config.videoInputLink) { active, msg ->
                             onVideoStreamingChange(active, msg)
                         }
                     }
@@ -489,6 +572,64 @@ fun MissionControlTab(
                     fontSize = 12.sp,
                     color = DarkBg
                 )
+            }
+        }
+
+        Spacer(Modifier.height(10.dp))
+
+        // --- 2b. ETHERNET CAMERA AUTO-DETECT ROW ---
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(PanelBg, RoundedCornerShape(10.dp))
+                .border(1.dp, CardBorderColor, RoundedCornerShape(10.dp))
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                Icon(
+                    Icons.Default.Router,
+                    contentDescription = null,
+                    tint = if (activeVideoSource == VideoSource.ETHERNET_CAMERA) ActiveGreen else NeonCyan,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(Modifier.width(10.dp))
+                Column {
+                    Text(
+                        if (activeVideoSource == VideoSource.ETHERNET_CAMERA) "Active: Ethernet Camera (SIYI)" else "Active: Phone Internal Camera",
+                        color = if (activeVideoSource == VideoSource.ETHERNET_CAMERA) ActiveGreen else LightText,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        "Auto-detects ${config.videoInputLink} -> Fallback to Phone",
+                        color = MutedText,
+                        fontSize = 9.sp,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 1
+                    )
+                }
+            }
+            val localCtx = LocalContext.current
+            OutlinedButton(
+                onClick = {
+                    java.util.concurrent.Executors.newSingleThreadExecutor().execute {
+                        val ok = cameraManager.probeEthernetCamera(config.videoInputLink)
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            Toast.makeText(
+                                localCtx,
+                                if (ok) "Ethernet Camera Online at ${config.videoInputLink}!" else "Ethernet Camera Offline. Will use Phone Camera.",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    }
+                },
+                shape = RoundedCornerShape(6.dp),
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = NeonCyan)
+            ) {
+                Text("TEST LINK", fontSize = 10.sp, fontWeight = FontWeight.Bold)
             }
         }
 
