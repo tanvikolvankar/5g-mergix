@@ -1,11 +1,11 @@
 {
-  "drone_id": "fahad@1",
+  "drone_id": "ajay@1",
   "telem_ip": "64.227.133.143",
   "telem_port": 6666,
   "drone_connection_type": "serial",
   "drone_port": "/dev/ttyAMA0",
   "baud_rate": 115200,
-  "video_input_link": "rtsp://192.168.144.25:8554/main.264",
+  "video_input_link": "rtsp://192.168.144.108:554/stream=0",
   "video_output_link": "rtsp://64.227.133.143:8554/mystream1",
-  "video_res": "630:360"
+  "video_res": "1280:720"
 }

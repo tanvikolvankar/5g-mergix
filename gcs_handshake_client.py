@@ -81,51 +81,12 @@ def run_handshake(server_ip, username, drone_id):
         print(f"[ERROR] Failed to connect to spawned relay port {spawned_port}: {e}")
         return
 
-    # 4. Local TCP Server for Mission Planner (Port 5760)
-    print("\n" + "-" * 65)
-    print(f"[LOCAL GCS] Listening on tcp://127.0.0.1:{LOCAL_GCS_PORT}")
-    print(f"-> Open Mission Planner -> Select 'TCP' -> Port {LOCAL_GCS_PORT} -> Connect")
-    print("-" * 65 + "\n")
+    global active_relay_sock
+    active_relay_sock = relay_sock
 
-    gcs_sockets = []
+    start_persistent_gcs_server()
 
-    def start_local_server():
-        try:
-            local_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            local_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            local_server.bind(("0.0.0.0", LOCAL_GCS_PORT))
-            local_server.listen(2)
-
-            while True:
-                client, addr = local_server.accept()
-                client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                print(f"[LOCAL GCS] Mission Planner connected from {addr}!")
-                gcs_sockets.append(client)
-
-                def handle_gcs(c):
-                    while True:
-                        try:
-                            data = c.recv(2048)
-                            if not data:
-                                break
-                            relay_sock.sendall(data)
-                        except Exception:
-                            break
-                    if c in gcs_sockets:
-                        gcs_sockets.remove(c)
-                    try:
-                        c.close()
-                    except Exception:
-                        pass
-                    print(f"[LOCAL GCS] Client disconnected")
-
-                threading.Thread(target=handle_gcs, args=(client,), daemon=True).start()
-        except Exception as e:
-            print(f"[LOCAL SERVER] Note: Could not bind port {LOCAL_GCS_PORT}: {e}")
-
-    threading.Thread(target=start_local_server, daemon=True).start()
-
-    # 5. Receive telemetry from Drone and print/forward
+    # 4. Receive telemetry from Drone and print/forward
     total_bytes = 0
     start_time = time.time()
 
@@ -147,16 +108,81 @@ def run_handshake(server_ip, username, drone_id):
             sys.stdout.write(f"\r[TELEMETRY] Received {total_bytes} bytes ({rate/1024:.2f} KB/s) from Drone | GCS Clients: {len(gcs_sockets)}   ")
             sys.stdout.flush()
 
-    except KeyboardInterrupt:
-        print("\n\n[EXIT] Handshake client stopped by user.")
     finally:
-        relay_sock.close()
+        active_relay_sock = None
+        try:
+            relay_sock.close()
+        except Exception:
+            pass
+
+gcs_sockets = []
+active_relay_sock = None
+local_server_started = False
+
+def start_persistent_gcs_server():
+    global local_server_started
+    if local_server_started:
+        return
+    local_server_started = True
+
+    def _server():
+        try:
+            local_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            local_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            local_server.bind(("0.0.0.0", LOCAL_GCS_PORT))
+            local_server.listen(4)
+            print(f"[LOCAL GCS] Persistent listener active on tcp://127.0.0.1:{LOCAL_GCS_PORT}")
+
+            while True:
+                client, addr = local_server.accept()
+                client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                print(f"\n[LOCAL GCS] Mission Planner / QGC connected from {addr}!")
+                gcs_sockets.append(client)
+
+                def handle_gcs(c):
+                    while True:
+                        try:
+                            data = c.recv(2048)
+                            if not data:
+                                break
+                            sock = active_relay_sock
+                            if sock:
+                                sock.sendall(data)
+                        except Exception:
+                            break
+                    if c in gcs_sockets:
+                        gcs_sockets.remove(c)
+                    try:
+                        c.close()
+                    except Exception:
+                        pass
+                    print(f"\n[LOCAL GCS] Client disconnected")
+
+                threading.Thread(target=handle_gcs, args=(client,), daemon=True).start()
+        except Exception as e:
+            print(f"[LOCAL SERVER] Note on port {LOCAL_GCS_PORT}: {e}")
+
+    threading.Thread(target=_server, daemon=True).start()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="5G MERGIX GCS Handshake & Telemetry Client")
     parser.add_argument("--server", default=DEFAULT_SERVER_IP, help="Cloud Server IP")
     parser.add_argument("--username", default="ajay", help="Username registered in userdata.db")
     parser.add_argument("--drone_id", default="ajay@1", help="Drone ID registered in userdata.db")
+    parser.add_argument("--once", action="store_true", help="Do not auto-reconnect on disconnect")
 
     args = parser.parse_args()
-    run_handshake(args.server, args.username, args.drone_id)
+
+    while True:
+        try:
+            run_handshake(args.server, args.username, args.drone_id)
+        except KeyboardInterrupt:
+            print("\n\n[EXIT] Stopped by user.")
+            break
+        except Exception as e:
+            print(f"\n[ERROR] Connection error: {e}")
+
+        if args.once:
+            break
+        print("\n[AUTO-RETRY] Connection broke. Re-authenticating & reconnecting in 3 seconds...")
+        time.sleep(3)
