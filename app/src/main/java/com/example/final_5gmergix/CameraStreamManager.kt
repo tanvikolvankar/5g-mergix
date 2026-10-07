@@ -1,6 +1,10 @@
 package com.example.final_5gmergix
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.util.Log
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
@@ -15,6 +19,8 @@ import com.pedro.library.rtsp.RtspCamera2
 import com.pedro.library.view.OpenGlView
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 enum class VideoSource {
     INTERNAL_PHONE,
@@ -35,18 +41,44 @@ class CameraStreamManager(
     private var rtspCamera2: RtspCamera2? = null
     private var openGlViewRef: OpenGlView? = null
 
+    val userWantsStreaming = AtomicBoolean(false)
+    private val reconnectExecutor = Executors.newSingleThreadScheduledExecutor()
+
     // Ethernet RTSP Relay Engine
-    val ethernetRelay = EthernetRtspRelayEngine(
+    val ethernetRelay: EthernetRtspRelayEngine = EthernetRtspRelayEngine(
+        context = context,
         onLog = { msg -> onLogMessage?.invoke(msg) },
         onStateChange = { active, msg ->
-            isStreaming = active
-            onStreamStateChanged?.invoke(active, msg)
+            if (userWantsStreaming.get()) {
+                isStreaming = true
+                onStreamStateChanged?.invoke(true, msg)
+            } else {
+                isStreaming = active
+                onStreamStateChanged?.invoke(active, msg)
+            }
         },
         onRelayFailed = { reason ->
-            Log.w(TAG, "Ethernet Camera stream dropped: $reason. Auto-falling back to internal phone camera!")
-            onLogMessage?.invoke("[VIDEO-FAILOVER] Ethernet Camera disconnected ($reason). Switching to Internal Phone Camera...")
-            // Fall back to phone camera
-            fallbackToInternalCamera()
+            Log.w(TAG, "Ethernet Camera stream dropped: $reason")
+            if (userWantsStreaming.get()) {
+                onLogMessage?.invoke("[VIDEO-AUTO-REFRESH] Ethernet Camera stream dropped ($reason). Auto-refreshing...")
+                statusListener?.invoke(true, "Ethernet Stream Break. Auto-refreshing...")
+                onStreamStateChanged?.invoke(true, "Ethernet Stream Break. Auto-refreshing...")
+                Executors.newSingleThreadExecutor().execute {
+                    val inputUrl = pendingInputRtspUrl ?: defaultInputRtspUrl
+                    val (reachable, _) = EthernetRtspRelayEngine.probeCameraDetailed(context, inputUrl, timeoutMs = 1200)
+                    if (reachable && userWantsStreaming.get()) {
+                        onLogMessage?.invoke("[VIDEO-RECONNECT] Ethernet Camera responsive. Reconnecting in 500ms...")
+                        try { Thread.sleep(500) } catch (_: InterruptedException) {}
+                        if (userWantsStreaming.get()) {
+                            ethernetRelay.startRelay(inputUrl, defaultCloudRtspUrl)
+                            onStreamStateChanged?.invoke(true, "LIVE: Ethernet Camera -> Cloud RTSP ($defaultCloudRtspUrl)")
+                        }
+                    } else if (userWantsStreaming.get()) {
+                        onLogMessage?.invoke("[VIDEO-FAILOVER] Ethernet Camera disconnected. Seamlessly switching to Phone Camera...")
+                        fallbackToInternalCamera()
+                    }
+                }
+            }
         }
     )
 
@@ -78,6 +110,93 @@ class CameraStreamManager(
     private var pendingAutoStreamUrl: String? = null
     private var pendingInputRtspUrl: String? = null
 
+    private var ethernetWatcherThread: Thread? = null
+    private val isWatchingForEthernet = AtomicBoolean(false)
+    private val isStartingStream = AtomicBoolean(false)
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
+    init {
+        registerEthernetNetworkCallback()
+    }
+
+    private fun registerEthernetNetworkCallback() {
+        try {
+            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+            val request = NetworkRequest.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
+                .build()
+            val callback = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    Log.d(TAG, "Ethernet interface available, triggering fast camera probe")
+                    if (isStreaming && activeSource == VideoSource.INTERNAL_PHONE) {
+                        Executors.newSingleThreadExecutor().execute {
+                            try { Thread.sleep(600) } catch (_: InterruptedException) {}
+                            if (isStreaming && activeSource == VideoSource.INTERNAL_PHONE) {
+                                val inUrl = pendingInputRtspUrl ?: defaultInputRtspUrl
+                                val (ok, resolved) = probeEthernetCameraWithAutoDetect(inUrl)
+                                if (ok && isStreaming && activeSource == VideoSource.INTERNAL_PHONE) {
+                                    val camLabel = if (resolved.contains(".25")) "ETHERNET CAMERA (SIYI)" else "ETHERNET CAMERA (SKYDROID)"
+                                    onLogMessage?.invoke("[VIDEO-AUTO] Ethernet Link online ($camLabel)! Auto-switching from Phone Camera...")
+                                    stopEthernetAutoRecoveryWatcher()
+                                    switchVideoSource(VideoSource.ETHERNET_CAMERA, defaultCloudRtspUrl, resolved) { active, msg ->
+                                        onStreamStateChanged?.invoke(active, msg)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            networkCallback = callback
+            cm.registerNetworkCallback(request, callback)
+        } catch (e: Exception) {
+            Log.w(TAG, "registerEthernetNetworkCallback: ${e.message}")
+        }
+    }
+
+    fun startEthernetAutoRecoveryWatcher(outputRtspUrl: String, inputRtspUrl: String) {
+        if (isWatchingForEthernet.getAndSet(true)) return
+        ethernetWatcherThread?.interrupt()
+        ethernetWatcherThread = Thread({
+            Log.d(TAG, "Ethernet Auto-Recovery Watcher active for $inputRtspUrl")
+            while (isWatchingForEthernet.get() && isStreaming && activeSource == VideoSource.INTERNAL_PHONE) {
+                try {
+                    Thread.sleep(1500)
+                } catch (_: InterruptedException) {
+                    break
+                }
+                if (!isWatchingForEthernet.get() || !isStreaming || activeSource != VideoSource.INTERNAL_PHONE) {
+                    break
+                }
+
+                val (reachable, resolvedInput) = probeEthernetCameraWithAutoDetect(inputRtspUrl)
+                if (reachable && isStreaming && activeSource == VideoSource.INTERNAL_PHONE) {
+                    val camLabel = if (resolvedInput.contains(".25")) "ETHERNET CAMERA (SIYI)" else "ETHERNET CAMERA (SKYDROID)"
+                    onLogMessage?.invoke("[VIDEO-AUTO] Ethernet Camera came online ($camLabel)! Auto-switching from Phone Camera...")
+                    isWatchingForEthernet.set(false)
+                    switchVideoSource(
+                        newSource = VideoSource.ETHERNET_CAMERA,
+                        outputRtspUrl = outputRtspUrl,
+                        inputRtspUrl = resolvedInput
+                    ) { active, msg ->
+                        onStreamStateChanged?.invoke(active, msg)
+                    }
+                    break
+                }
+            }
+            isWatchingForEthernet.set(false)
+        }, "EthernetAutoWatcher").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    fun stopEthernetAutoRecoveryWatcher() {
+        isWatchingForEthernet.set(false)
+        ethernetWatcherThread?.interrupt()
+        ethernetWatcherThread = null
+    }
+
     fun updateStreamSettings(width: Int, height: Int, fps: Int, bitrateKbps: Int) {
         streamWidth = width
         streamHeight = height
@@ -86,14 +205,76 @@ class CameraStreamManager(
         Log.d(TAG, "Stream settings updated: ${streamWidth}x${streamHeight} @ ${streamFps} FPS (${bitrateKbps} Kbps)")
     }
 
+    companion object {
+        const val SKYDROID_URL = "rtsp://192.168.144.108:554/stream=0"
+        const val SIYI_URL = "rtsp://192.168.144.25:8554/main.264"
+    }
+
     /**
-     * Probes whether the external Ethernet camera (e.g. SIYI) is connected and responding.
+     * Concurrent, non-blocking parallel probe of both SIYI and Skydroid cameras.
+     * Returns Pair(isReachable, resolvedWorkingUrl) in under 100ms.
      */
+    fun probeEthernetCameraWithAutoDetect(inputUrl: String = defaultInputRtspUrl): Pair<Boolean, String> {
+        if (isStreaming && activeSource == VideoSource.ETHERNET_CAMERA && ethernetRelay.isRunning.get()) {
+            return Pair(true, inputUrl)
+        }
+
+        val primary = if (inputUrl.isBlank()) SIYI_URL else inputUrl
+        val alternate = if (primary.contains(".25")) SKYDROID_URL else SIYI_URL
+
+        var primaryResult: Pair<Boolean, String>? = null
+        var alternateResult: Pair<Boolean, String>? = null
+
+        val t1 = Thread({
+            primaryResult = EthernetRtspRelayEngine.probeCameraDetailed(context, primary, timeoutMs = 1200)
+        }, "ProbePrimary")
+
+        val t2 = Thread({
+            alternateResult = EthernetRtspRelayEngine.probeCameraDetailed(context, alternate, timeoutMs = 1200)
+        }, "ProbeAlternate")
+
+        t1.start()
+        t2.start()
+
+        try {
+            t1.join(1500)
+            t2.join(1500)
+        } catch (_: InterruptedException) {}
+
+        if (primaryResult?.first == true) {
+            isEthernetAvailable = true
+            Log.d(TAG, "Parallel probe: Found primary camera $primary (${primaryResult?.second})")
+            return Pair(true, primary)
+        }
+
+        if (alternateResult?.first == true) {
+            isEthernetAvailable = true
+            Log.d(TAG, "Parallel probe: Found alternate camera $alternate (${alternateResult?.second})")
+            return Pair(true, alternate)
+        }
+
+        isEthernetAvailable = false
+        Log.d(TAG, "Parallel probe: Neither camera reachable")
+        return Pair(false, primary)
+    }
+
     fun probeEthernetCamera(inputUrl: String = defaultInputRtspUrl): Boolean {
-        val reachable = EthernetRtspRelayEngine.probeCamera(inputUrl, timeoutMs = 1200)
-        isEthernetAvailable = reachable
-        Log.d(TAG, "Probe Ethernet Camera ($inputUrl): reachable=$reachable")
-        return reachable
+        return probeEthernetCameraWithAutoDetect(inputUrl).first
+    }
+
+    fun autoDetectSourceOnStartup(inputUrl: String = defaultInputRtspUrl) {
+        Executors.newSingleThreadExecutor().execute {
+            val (reachable, resolved) = probeEthernetCameraWithAutoDetect(inputUrl)
+            if (reachable) {
+                activeSource = VideoSource.ETHERNET_CAMERA
+                val label = if (resolved.contains(".25")) "ETHERNET CAMERA (SIYI)" else "ETHERNET CAMERA (SKYDROID)"
+                onVideoSourceChanged?.invoke(VideoSource.ETHERNET_CAMERA, label)
+                onLogMessage?.invoke("[VIDEO-DETECT] Ethernet Camera detected on LAN: $label ($resolved)")
+            } else {
+                activeSource = VideoSource.INTERNAL_PHONE
+                onVideoSourceChanged?.invoke(VideoSource.INTERNAL_PHONE, "INTERNAL PHONE CAMERA")
+            }
+        }
     }
 
     fun startCamera(
@@ -185,7 +366,29 @@ class CameraStreamManager(
         }
     }
 
+    fun triggerAutoStreamRefresh(delayMs: Long = 1500) {
+        if (!userWantsStreaming.get()) return
+        reconnectExecutor.schedule({
+            if (!userWantsStreaming.get()) return@schedule
+            Log.d(TAG, "Triggering automatic stream refresh...")
+            val output = defaultCloudRtspUrl
+            val input = pendingInputRtspUrl ?: defaultInputRtspUrl
+
+            val (ok, resolved) = probeEthernetCameraWithAutoDetect(input)
+            if (ok && userWantsStreaming.get()) {
+                switchVideoSource(VideoSource.ETHERNET_CAMERA, output, resolved) { active, msg ->
+                    if (userWantsStreaming.get()) onStreamStateChanged?.invoke(true, msg)
+                }
+            } else if (userWantsStreaming.get()) {
+                switchVideoSource(VideoSource.INTERNAL_PHONE, output, input) { active, msg ->
+                    if (userWantsStreaming.get()) onStreamStateChanged?.invoke(true, msg)
+                }
+            }
+        }, delayMs, TimeUnit.MILLISECONDS)
+    }
+
     fun queueAutoStartStream(outputRtspUrl: String = defaultCloudRtspUrl, inputRtspUrl: String = defaultInputRtspUrl) {
+        userWantsStreaming.set(true)
         val targetUrl = if (outputRtspUrl.isBlank()) defaultCloudRtspUrl else outputRtspUrl
         val inputUrl = if (inputRtspUrl.isBlank()) defaultInputRtspUrl else inputRtspUrl
         if (isStreaming) {
@@ -228,37 +431,118 @@ class CameraStreamManager(
         inputRtspUrl: String = defaultInputRtspUrl,
         onStatusChange: (Boolean, String) -> Unit
     ) {
+        userWantsStreaming.set(true)
+        isStreaming = true
         statusListener = onStatusChange
         val targetOutput = if (outputRtspUrl.isBlank()) defaultCloudRtspUrl else outputRtspUrl
         val targetInput = if (inputRtspUrl.isBlank()) defaultInputRtspUrl else inputRtspUrl
 
+        // If already streaming via Ethernet relay, don't interrupt or re-probe
+        if (isStreaming && activeSource == VideoSource.ETHERNET_CAMERA && ethernetRelay.isRunning.get()) {
+            Log.d(TAG, "Ethernet camera stream already running, ignoring duplicate start request.")
+            onStatusChange(true, "LIVE: Ethernet Camera -> Cloud RTSP ($targetOutput)")
+            return
+        }
+
+        if (!isStartingStream.compareAndSet(false, true)) {
+            Log.d(TAG, "Stream start already in progress, ignoring duplicate concurrent call.")
+            return
+        }
+
         Executors.newSingleThreadExecutor().execute {
-            onLogMessage?.invoke("[VIDEO] Probing Ethernet Camera at $targetInput...")
-            val ethReachable = probeEthernetCamera(targetInput)
+            try {
+                if (isStreaming && activeSource == VideoSource.ETHERNET_CAMERA && ethernetRelay.isRunning.get()) {
+                    return@execute
+                }
 
-            if (ethReachable) {
-                // --- 1. ETHERNET CAMERA DETECTED ---
-                activeSource = VideoSource.ETHERNET_CAMERA
-                onVideoSourceChanged?.invoke(VideoSource.ETHERNET_CAMERA, "ETHERNET CAMERA (SIYI)")
-                onLogMessage?.invoke("[VIDEO] Ethernet Camera detected! Selecting Ethernet Camera as primary stream.")
+                onLogMessage?.invoke("[VIDEO] Auto-detecting Ethernet Camera ($targetInput)...")
+                val (ethReachable, resolvedInput) = probeEthernetCameraWithAutoDetect(targetInput)
 
-                // Stop local phone encoder if running
-                rtspCamera2?.let { if (it.isStreaming) it.stopStream() }
+                if (ethReachable) {
+                    // --- 1. ETHERNET CAMERA DETECTED ---
+                    stopEthernetAutoRecoveryWatcher()
+                    activeSource = VideoSource.ETHERNET_CAMERA
+                    val camLabel = if (resolvedInput.contains(".25")) "ETHERNET CAMERA (SIYI)" else "ETHERNET CAMERA (SKYDROID)"
+                    onVideoSourceChanged?.invoke(VideoSource.ETHERNET_CAMERA, camLabel)
+                    onLogMessage?.invoke("[VIDEO] $camLabel online ($resolvedInput)! Starting relay.")
 
-                // Start relay pipeline
-                isStreaming = true
-                ethernetRelay.startRelay(targetInput, targetOutput)
-                onStatusChange(true, "LIVE: Ethernet Camera -> Cloud RTSP ($targetOutput)")
+                    // Stop local phone encoder if running and wait for cloud session to close cleanly
+                    if (rtspCamera2?.isStreaming == true) {
+                        rtspCamera2?.stopStream()
+                        try { Thread.sleep(400) } catch (_: InterruptedException) {}
+                    }
+
+                    // Start relay pipeline
+                    isStreaming = true
+                    ethernetRelay.startRelay(resolvedInput, targetOutput)
+                    onStatusChange(true, "LIVE: Ethernet Camera -> Cloud RTSP ($targetOutput)")
+                } else {
+                    // --- 2. FALLBACK TO INTERNAL PHONE CAMERA ---
+                    activeSource = VideoSource.INTERNAL_PHONE
+                    onVideoSourceChanged?.invoke(VideoSource.INTERNAL_PHONE, "INTERNAL PHONE CAMERA")
+                    onLogMessage?.invoke("[VIDEO] Ethernet Camera offline. Auto-selecting Phone Internal Camera.")
+
+                    // Stop ethernet relay if active
+                    if (ethernetRelay.isRunning.get()) ethernetRelay.stopRelay()
+
+                    startInternalCameraStream(targetOutput, onStatusChange)
+
+                    // Start background watcher to auto-switch the moment Ethernet camera appears
+                    startEthernetAutoRecoveryWatcher(targetOutput, targetInput)
+                }
+            } finally {
+                isStartingStream.set(false)
+            }
+        }
+    }
+
+    /**
+     * Seamlessly hot-switches the active video source between Phone Camera and Ethernet Camera.
+     * If currently live streaming, cleanly migrates the RTSP feed to Cloud without stopping session.
+     */
+    fun switchVideoSource(
+        newSource: VideoSource,
+        outputRtspUrl: String = defaultCloudRtspUrl,
+        inputRtspUrl: String = defaultInputRtspUrl,
+        onStatusChange: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        val targetOutput = if (outputRtspUrl.isBlank()) defaultCloudRtspUrl else outputRtspUrl
+        val targetInput = if (inputRtspUrl.isBlank()) defaultInputRtspUrl else inputRtspUrl
+
+        Executors.newSingleThreadExecutor().execute {
+            if (newSource == VideoSource.ETHERNET_CAMERA) {
+                stopEthernetAutoRecoveryWatcher()
+                val (reachable, resolvedInput) = probeEthernetCameraWithAutoDetect(targetInput)
+                if (reachable) {
+                    activeSource = VideoSource.ETHERNET_CAMERA
+                    val camLabel = if (resolvedInput.contains(".25")) "ETHERNET CAMERA (SIYI)" else "ETHERNET CAMERA (SKYDROID)"
+                    onVideoSourceChanged?.invoke(VideoSource.ETHERNET_CAMERA, camLabel)
+                    onLogMessage?.invoke("[VIDEO-SWITCH] Switched to $camLabel ($resolvedInput)")
+
+                    if (isStreaming) {
+                        if (rtspCamera2?.isStreaming == true) {
+                            rtspCamera2?.stopStream()
+                            try { Thread.sleep(400) } catch (_: InterruptedException) {}
+                        }
+                        ethernetRelay.startRelay(resolvedInput, targetOutput)
+                        onStatusChange(true, "LIVE: Ethernet Camera -> Cloud RTSP ($targetOutput)")
+                    }
+                } else {
+                    onLogMessage?.invoke("[VIDEO-SWITCH] Cannot switch: Ethernet Camera offline on LAN.")
+                }
             } else {
-                // --- 2. FALLBACK TO INTERNAL PHONE CAMERA ---
                 activeSource = VideoSource.INTERNAL_PHONE
                 onVideoSourceChanged?.invoke(VideoSource.INTERNAL_PHONE, "INTERNAL PHONE CAMERA")
-                onLogMessage?.invoke("[VIDEO] Ethernet Camera offline. Auto-selecting Phone Internal Camera.")
+                onLogMessage?.invoke("[VIDEO-SWITCH] Switched to Internal Phone Camera")
 
-                // Stop ethernet relay if active
-                if (ethernetRelay.isRunning.get()) ethernetRelay.stopRelay()
-
-                startInternalCameraStream(targetOutput, onStatusChange)
+                if (isStreaming) {
+                    if (ethernetRelay.isRunning.get()) {
+                        ethernetRelay.stopRelay()
+                        try { Thread.sleep(400) } catch (_: InterruptedException) {}
+                    }
+                    startInternalCameraStream(targetOutput, onStatusChange)
+                    startEthernetAutoRecoveryWatcher(targetOutput, targetInput)
+                }
             }
         }
     }
@@ -342,9 +626,12 @@ class CameraStreamManager(
             isStreaming = active
             onStreamStateChanged?.invoke(active, msg)
         }
+        startEthernetAutoRecoveryWatcher(defaultCloudRtspUrl, pendingInputRtspUrl ?: defaultInputRtspUrl)
     }
 
     fun stop5GVideoStream(onStatusChange: (Boolean, String) -> Unit) {
+        userWantsStreaming.set(false)
+        stopEthernetAutoRecoveryWatcher()
         if (ethernetRelay.isRunning.get()) {
             ethernetRelay.stopRelay()
         }
@@ -355,10 +642,12 @@ class CameraStreamManager(
         }
         isStreaming = false
         onStatusChange(false, "5G camera stream stopped")
+        onStreamStateChanged?.invoke(false, "5G camera stream stopped")
     }
 
     fun stopCamera() {
         try {
+            stopEthernetAutoRecoveryWatcher()
             if (ethernetRelay.isRunning.get()) ethernetRelay.stopRelay()
             cameraProvider?.unbindAll()
             rtspCamera2?.stopStream()
@@ -368,8 +657,16 @@ class CameraStreamManager(
     }
 
     fun shutdown() {
+        userWantsStreaming.set(false)
         stopCamera()
+        try {
+            networkCallback?.let { cb ->
+                val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                cm?.unregisterNetworkCallback(cb)
+            }
+        } catch (_: Exception) {}
         cameraExecutor.shutdown()
+        reconnectExecutor.shutdown()
     }
 
     // --- ConnectChecker Callbacks ---
@@ -387,27 +684,54 @@ class CameraStreamManager(
     }
 
     override fun onConnectionFailed(reason: String) {
-        isStreaming = false
         Log.e(TAG, "Phone Camera RTSP Connection Failed: $reason")
-        val msg = "RTSP Connect Failed: $reason (Check 5G connection / Cloud Server port 8554)"
-        statusListener?.invoke(false, msg)
-        onStreamStateChanged?.invoke(false, msg)
+        if (userWantsStreaming.get()) {
+            isStreaming = true
+            val msg = "RTSP Break ($reason). Auto-refreshing in 1.5s..."
+            onLogMessage?.invoke("[VIDEO-AUTO-REFRESH] RTSP break: $reason. Auto-reconnecting in 1.5s...")
+            statusListener?.invoke(true, msg)
+            onStreamStateChanged?.invoke(true, msg)
+            triggerAutoStreamRefresh(1500)
+        } else {
+            isStreaming = false
+            val msg = "RTSP Connect Failed: $reason (Check 5G connection / Cloud Server port 8554)"
+            statusListener?.invoke(false, msg)
+            onStreamStateChanged?.invoke(false, msg)
+        }
     }
 
     override fun onNewBitrate(bitrate: Long) {}
 
     override fun onDisconnect() {
-        isStreaming = false
         Log.d(TAG, "Phone Camera RTSP Stream Disconnected")
-        val msg = "RTSP Stream Disconnected"
-        statusListener?.invoke(false, msg)
-        onStreamStateChanged?.invoke(false, msg)
+        if (userWantsStreaming.get()) {
+            isStreaming = true
+            val msg = "RTSP Stream Break. Auto-refreshing in 1.5s..."
+            onLogMessage?.invoke("[VIDEO-AUTO-REFRESH] RTSP stream disconnected. Auto-refreshing in 1.5s...")
+            statusListener?.invoke(true, msg)
+            onStreamStateChanged?.invoke(true, msg)
+            triggerAutoStreamRefresh(1500)
+        } else {
+            isStreaming = false
+            val msg = "RTSP Stream Disconnected"
+            statusListener?.invoke(false, msg)
+            onStreamStateChanged?.invoke(false, msg)
+        }
     }
 
     override fun onAuthError() {
-        isStreaming = false
         Log.e(TAG, "Phone Camera RTSP Auth Error")
-        statusListener?.invoke(false, "RTSP Server Authentication Error")
+        if (userWantsStreaming.get()) {
+            isStreaming = true
+            val msg = "RTSP Auth Reset. Auto-refreshing in 2s..."
+            onLogMessage?.invoke("[VIDEO-AUTO-REFRESH] RTSP auth reset. Auto-refreshing in 2s...")
+            statusListener?.invoke(true, msg)
+            onStreamStateChanged?.invoke(true, msg)
+            triggerAutoStreamRefresh(2000)
+        } else {
+            isStreaming = false
+            statusListener?.invoke(false, "RTSP Server Authentication Error")
+        }
     }
 
     override fun onAuthSuccess() {

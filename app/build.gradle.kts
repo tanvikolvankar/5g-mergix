@@ -20,10 +20,17 @@ android {
     }
 
     buildTypes {
+        debug {
+            isDebuggable = false
+        }
         release {
-            optimization {
-                enable = false
-            }
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debug")
+        }
+    }
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
         }
     }
     compileOptions {
@@ -46,8 +53,8 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
 
-    // CameraX
-    val cameraVersion = "1.3.1"
+    // CameraX 1.4.1 (16 KB page-aligned native libs)
+    val cameraVersion = "1.4.1"
     implementation("androidx.camera:camera-core:$cameraVersion")
     implementation("androidx.camera:camera-camera2:$cameraVersion")
     implementation("androidx.camera:camera-lifecycle:$cameraVersion")

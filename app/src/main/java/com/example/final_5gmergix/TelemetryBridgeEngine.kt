@@ -102,6 +102,7 @@ class TelemetryBridgeEngine(private val context: Context) {
     private var usbReadThread: Thread? = null
     private var mavlinkStreamRequesterThread: Thread? = null
     private var localTcpServerThread: Thread? = null
+    private var localServerSocket: ServerSocket? = null
 
     // Multiple listeners can receive FC bytes (Cloud relay + optional local Mission Planner)
     private val activeOutStreams = CopyOnWriteArrayList<OutputStream>()
@@ -143,8 +144,12 @@ class TelemetryBridgeEngine(private val context: Context) {
                     scanAndConnectUsb()
                 }
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
-                    log("[USB] Flight Controller cable detached - stopping hardware link")
+                    log("[USB] Flight Controller cable detached - auto-refreshing and waiting for reconnect...")
                     closeUsb()
+                    if (isRunning.get()) {
+                        updateState(BridgeState.SEARCHING_USB, "Waiting for Flight Controller reconnect...")
+                        startUsbAutoScanner()
+                    }
                     onUsbDisconnectedAutoTrigger?.invoke()
                 }
             }
@@ -213,8 +218,9 @@ class TelemetryBridgeEngine(private val context: Context) {
 
         updateState(BridgeState.SEARCHING_USB, "Scanning for Flight Controller (USB OTG)...")
 
-        // 1. Scan and connect USB
+        // 1. Scan and connect USB, and keep auto-scanner active
         scanAndConnectUsb()
+        startUsbAutoScanner()
 
         // 2. Start Cloud Socket Relay Thread (Implements drone_app_bridge.cpp state machine)
         startCloudRelayMaster()
@@ -233,10 +239,15 @@ class TelemetryBridgeEngine(private val context: Context) {
         masterThread?.interrupt()
         usbReadThread?.interrupt()
         localTcpServerThread?.interrupt()
+        usbScannerThread?.interrupt()
 
         masterThread = null
         usbReadThread = null
         localTcpServerThread = null
+        usbScannerThread = null
+
+        try { localServerSocket?.close() } catch (_: Exception) {}
+        localServerSocket = null
 
         activeOutStreams.clear()
 
@@ -287,7 +298,7 @@ class TelemetryBridgeEngine(private val context: Context) {
                     if (!isUsbConnected) {
                         scanAndConnectUsb()
                     }
-                    Thread.sleep(1500)
+                    Thread.sleep(800)
                 } catch (_: InterruptedException) {
                     break
                 } catch (_: Exception) {}
@@ -304,6 +315,12 @@ class TelemetryBridgeEngine(private val context: Context) {
             }
 
             for (device in rawDevices) {
+                // Ignore Ethernet adapters, USB hubs, and audio devices (Realtek GbE etc.)
+                val prodName = (device.productName ?: "").lowercase()
+                if (prodName.contains("lan") || prodName.contains("ethernet") || prodName.contains("realtek") || prodName.contains("hub") || device.vendorId == 0x0BDA) {
+                    continue
+                }
+
                 if (!usbManager.hasPermission(device)) {
                     log("[USB] Found ${device.deviceName} (${device.productName ?: "FC"}). Requesting USB permission...")
                     val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -327,23 +344,36 @@ class TelemetryBridgeEngine(private val context: Context) {
     }
 
     fun connectUsbSerial(device: UsbDevice) {
+        val prodName = (device.productName ?: "").lowercase()
+        if (prodName.contains("lan") || prodName.contains("ethernet") || prodName.contains("realtek") || prodName.contains("hub") || device.vendorId == 0x0BDA) {
+            return
+        }
+
         val customDrivers = getCustomProber().findAllDrivers(usbManager)
         val defaultDrivers = UsbSerialProber.getDefaultProber().findAllDrivers(usbManager)
         val drivers = (customDrivers + defaultDrivers).filter { it.device.deviceId == device.deviceId }
-        val driver = drivers.firstOrNull() ?: CdcAcmSerialDriver(device)
+        val driver = drivers.firstOrNull()
+        if (driver == null) {
+            val isSerialClass = device.deviceClass == 2 || (device.interfaceCount > 0 && (device.getInterface(0).interfaceClass == 2 || device.getInterface(0).interfaceClass == 10))
+            if (!isSerialClass) {
+                log("[USB] Ignoring non-serial device: ${device.productName ?: device.deviceName}")
+                return
+            }
+        }
+        val actualDriver = driver ?: CdcAcmSerialDriver(device)
 
         try {
-            val connection = usbManager.openDevice(driver.device) ?: run {
-                log("[USB] Unable to open USB connection to ${driver.device.deviceName}")
+            val connection = usbManager.openDevice(actualDriver.device) ?: run {
+                log("[USB] Unable to open USB connection to ${actualDriver.device.deviceName}")
                 return
             }
 
-            if (driver.ports.isEmpty()) {
+            if (actualDriver.ports.isEmpty()) {
                 log("[USB] Driver found but no ports available")
                 return
             }
 
-            val port = driver.ports[0]
+            val port = actualDriver.ports[0]
             port.open(connection)
             port.setParameters(baudRate, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
             try {
@@ -698,14 +728,20 @@ class TelemetryBridgeEngine(private val context: Context) {
 
     private fun startLocalTcpServer(port: Int) {
         localTcpServerThread?.interrupt()
+        try { localServerSocket?.close() } catch (_: Exception) {}
+        localServerSocket = null
+
         localTcpServerThread = thread(start = true, name = "local_tcp_server") {
-            var serverSocket: ServerSocket? = null
             try {
-                serverSocket = ServerSocket(port)
+                localServerSocket = ServerSocket().apply {
+                    reuseAddress = true
+                    bind(InetSocketAddress(port))
+                }
+                val socket = localServerSocket ?: return@thread
                 log("[Local TCP] Mission Planner server listening on port $port")
 
-                while (isRunning.get()) {
-                    val client = serverSocket.accept()
+                while (isRunning.get() && !socket.isClosed) {
+                    val client = socket.accept()
                     client.tcpNoDelay = true
                     log("[Local TCP] Local GCS (Mission Planner/QGC) connected: ${client.remoteSocketAddress}")
 
@@ -732,7 +768,8 @@ class TelemetryBridgeEngine(private val context: Context) {
             } catch (e: Exception) {
                 if (isRunning.get()) log("[Local TCP] Server error: ${e.localizedMessage}")
             } finally {
-                try { serverSocket?.close() } catch (_: Exception) {}
+                try { localServerSocket?.close() } catch (_: Exception) {}
+                localServerSocket = null
             }
         }
     }

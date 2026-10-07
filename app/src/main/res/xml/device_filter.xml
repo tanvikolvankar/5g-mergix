@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Universal catch-all for all Flight Controllers (MicoAir, Pixhawk, Cube, etc.) -->
-    <usb-device />
+    <!-- Flight Controller specific Vendor IDs and CDC Serial Classes only (ignoring hubs and network adapters) -->
+    <usb-device class="2" /> <!-- USB CDC (Communication Device Class) -->
+    <usb-device class="10" /> <!-- USB CDC Data -->
 
     <!-- Specific Vendor IDs for Flight Controllers & Serial Adapters -->
     <usb-device vendor-id="1155" /> <!-- STMicroelectronics / MicoAir / STM32 VCP (0x0483) -->
@@ -16,9 +17,4 @@
     <usb-device vendor-id="5824" /> <!-- PJRC Teensy (0x16C0) -->
     <usb-device vendor-id="11914" /> <!-- Raspberry Pi RP2040 (0x2E8A) -->
     <usb-device vendor-id="12346" /> <!-- Espressif ESP32-S2/S3 (0x303A) -->
-
-    <!-- USB Device Classes -->
-    <usb-device class="2" /> <!-- USB CDC (Communication Device Class) -->
-    <usb-device class="10" /> <!-- USB CDC Data -->
-    <usb-device class="255" /> <!-- Vendor Specific Class -->
 </resources>

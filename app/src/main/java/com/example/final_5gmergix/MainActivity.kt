@@ -12,6 +12,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
+import android.util.Log
 import android.view.WindowManager
 import com.example.final_5gmergix.ui.MergixDashboard
 import com.example.final_5gmergix.ui.theme.Final_5GMERGIXTheme
@@ -23,10 +24,16 @@ class MainActivity : ComponentActivity() {
     private lateinit var telemetryEngine: TelemetryBridgeEngine
     private lateinit var pythonEngine: PythonRunnerEngine
 
+    private fun hasRequiredPermissions(): Boolean {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+    }
+
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
-        // Permissions handled
+        if (permissions[Manifest.permission.CAMERA] == true && ::telemetryEngine.isInitialized && telemetryEngine.isUsbConnected) {
+            startFullAutoMission()
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -54,22 +61,32 @@ class MainActivity : ComponentActivity() {
         // Setup auto-start trigger when USB FC connects
         telemetryEngine.onUsbConnectedAutoTrigger = {
             runOnUiThread {
-                startFullAutoMission()
+                if (hasRequiredPermissions()) {
+                    startFullAutoMission()
+                }
             }
         }
 
-        // Setup auto-stop trigger when USB FC disconnects
+        // When USB FC disconnects, keep mission armed and auto-refresh for reconnect
         telemetryEngine.onUsbDisconnectedAutoTrigger = {
             runOnUiThread {
-                stopFullAutoMission()
+                Log.d("MainActivity", "USB FC detached - keeping telemetry and video armed for reconnect")
             }
         }
 
-        // Request runtime permissions
+        // Request runtime permissions in single clean prompt
         requestRequiredPermissions()
 
-        // Handle USB connection if launched via USB_DEVICE_ATTACHED
-        handleUsbIntent(intent)
+        // Fast background probe to detect SIYI/Skydroid camera on startup
+        val cfg = configManager.loadConfig()
+        cameraManager.autoDetectSourceOnStartup(cfg.videoInputLink)
+
+        // Auto-handle USB connection if launched via USB_DEVICE_ATTACHED, or scan if already plugged in
+        if (intent?.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) {
+            handleUsbIntent(intent)
+        } else {
+            telemetryEngine.scanAndConnectUsb()
+        }
 
         setContent {
             Final_5GMERGIXTheme {
@@ -125,6 +142,8 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private var lastAutoStartTimestamp = 0L
+
     /**
      * Completely hands-free auto mission start:
      * 1. Starts persistent foreground service
@@ -132,6 +151,13 @@ class MainActivity : ComponentActivity() {
      * 3. Starts hardware H.264 5G video stream
      */
     fun startFullAutoMission() {
+        val now = System.currentTimeMillis()
+        if (now - lastAutoStartTimestamp < 1500) {
+            Log.d("MainActivity", "Throttling duplicate startFullAutoMission call within 1.5s")
+            return
+        }
+        lastAutoStartTimestamp = now
+
         startBackgroundService()
         val config = configManager.loadConfig()
 
@@ -164,10 +190,8 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         if (::telemetryEngine.isInitialized) {
             telemetryEngine.scanAndConnectUsb()
-            if (telemetryEngine.isUsbConnected) {
+            if (telemetryEngine.isUsbConnected && hasRequiredPermissions()) {
                 startFullAutoMission()
-            } else if (!telemetryEngine.isBridgeRunning) {
-                stopBackgroundService()
             }
         }
     }
@@ -187,12 +211,19 @@ class MainActivity : ComponentActivity() {
                 @Suppress("DEPRECATION")
                 intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
             }
+            val prodName = (device?.productName ?: "").lowercase()
+            if (prodName.contains("lan") || prodName.contains("ethernet") || prodName.contains("realtek") || device?.vendorId == 0x0BDA) {
+                Log.d("MainActivity", "Ignoring non-serial USB device attach: ${device?.productName}")
+                return
+            }
             if (device != null && ::telemetryEngine.isInitialized) {
                 telemetryEngine.connectUsbSerial(device)
             } else if (::telemetryEngine.isInitialized) {
                 telemetryEngine.scanAndConnectUsb()
             }
-            startFullAutoMission()
+            if (hasRequiredPermissions()) {
+                startFullAutoMission()
+            }
         }
     }
 

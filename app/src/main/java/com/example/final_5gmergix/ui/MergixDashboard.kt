@@ -8,6 +8,7 @@ import androidx.camera.core.CameraSelector
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -23,8 +24,10 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -137,6 +140,19 @@ fun MergixDashboard(
             cameraManager.onLogMessage = null
             telemetryEngine.onStatusUpdated = null
             telemetryEngine.onLogMessage = null
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        java.util.concurrent.Executors.newSingleThreadExecutor().execute {
+            val (ok, resolved) = cameraManager.probeEthernetCameraWithAutoDetect(currentConfig.videoInputLink)
+            if (ok) {
+                cameraManager.switchVideoSource(
+                    newSource = VideoSource.ETHERNET_CAMERA,
+                    outputRtspUrl = currentConfig.videoOutputLink,
+                    inputRtspUrl = resolved
+                )
+            }
         }
     }
 
@@ -262,8 +278,14 @@ fun MergixDashboard(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            when (selectedTab) {
-                0 -> MissionControlTab(
+            // Tab 0: Mission Control (Persistent so OpenGlView surface is NEVER destroyed on tab switch)
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .alpha(if (selectedTab == 0) 1f else 0f)
+                    .zIndex(if (selectedTab == 0) 1f else 0f)
+            ) {
+                MissionControlTab(
                     config = currentConfig,
                     cameraManager = cameraManager,
                     telemetryEngine = telemetryEngine,
@@ -278,18 +300,29 @@ fun MergixDashboard(
                     onStartService = onStartService,
                     onStopService = onStopService
                 )
-                1 -> TerminalTab(terminalLogs)
-                2 -> SettingsTab(
-                    currentConfig = currentConfig,
-                    onSave = { updated ->
-                        if (configManager.saveConfig(updated)) {
-                            currentConfig = updated
-                            cameraManager.defaultCloudRtspUrl = updated.videoOutputLink
-                            Toast.makeText(context, "Settings Saved!", Toast.LENGTH_SHORT).show()
+            }
+
+            if (selectedTab == 1) {
+                Box(modifier = Modifier.fillMaxSize().background(DarkBg).zIndex(2f)) {
+                    TerminalTab(terminalLogs)
+                }
+            } else if (selectedTab == 2) {
+                Box(modifier = Modifier.fillMaxSize().background(DarkBg).zIndex(2f)) {
+                    SettingsTab(
+                        currentConfig = currentConfig,
+                        onSave = { updated ->
+                            if (configManager.saveConfig(updated)) {
+                                currentConfig = updated
+                                cameraManager.defaultCloudRtspUrl = updated.videoOutputLink
+                                Toast.makeText(context, "Settings Saved!", Toast.LENGTH_SHORT).show()
+                            }
                         }
-                    }
-                )
-                3 -> ScriptsTab(pythonEngine)
+                    )
+                }
+            } else if (selectedTab == 3) {
+                Box(modifier = Modifier.fillMaxSize().background(DarkBg).zIndex(2f)) {
+                    ScriptsTab(pythonEngine)
+                }
             }
         }
     }
@@ -582,7 +615,19 @@ fun MissionControlTab(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(PanelBg, RoundedCornerShape(10.dp))
-                .border(1.dp, CardBorderColor, RoundedCornerShape(10.dp))
+                .border(
+                    1.dp,
+                    if (activeVideoSource == VideoSource.ETHERNET_CAMERA) ActiveGreen.copy(alpha = 0.6f) else CardBorderColor,
+                    RoundedCornerShape(10.dp)
+                )
+                .clickable {
+                    val target = if (activeVideoSource == VideoSource.ETHERNET_CAMERA) {
+                        VideoSource.INTERNAL_PHONE
+                    } else {
+                        VideoSource.ETHERNET_CAMERA
+                    }
+                    cameraManager.switchVideoSource(target, config.videoOutputLink, config.videoInputLink)
+                }
                 .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
@@ -603,7 +648,7 @@ fun MissionControlTab(
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        "Auto-detects ${config.videoInputLink} -> Fallback to Phone",
+                        if (activeVideoSource == VideoSource.ETHERNET_CAMERA) "Tap to switch to Phone Cam | ${config.videoInputLink}" else "Tap to switch to SIYI | Auto-fallback to Phone",
                         color = MutedText,
                         fontSize = 9.sp,
                         fontFamily = FontFamily.Monospace,
@@ -615,21 +660,36 @@ fun MissionControlTab(
             OutlinedButton(
                 onClick = {
                     java.util.concurrent.Executors.newSingleThreadExecutor().execute {
-                        val ok = cameraManager.probeEthernetCamera(config.videoInputLink)
+                        val (ok, resolved) = cameraManager.probeEthernetCameraWithAutoDetect(config.videoInputLink)
                         android.os.Handler(android.os.Looper.getMainLooper()).post {
-                            Toast.makeText(
-                                localCtx,
-                                if (ok) "Ethernet Camera Online at ${config.videoInputLink}!" else "Ethernet Camera Offline. Will use Phone Camera.",
-                                Toast.LENGTH_SHORT
-                            ).show()
+                            if (ok) {
+                                cameraManager.switchVideoSource(
+                                    VideoSource.ETHERNET_CAMERA,
+                                    config.videoOutputLink,
+                                    resolved
+                                )
+                                Toast.makeText(
+                                    localCtx,
+                                    "Switched to Ethernet Camera (${if (resolved.contains(".25")) "SIYI" else "Skydroid"})!",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            } else {
+                                Toast.makeText(
+                                    localCtx,
+                                    "Ethernet Camera Offline on LAN. Using Phone Camera.",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
                         }
                     }
                 },
                 shape = RoundedCornerShape(6.dp),
                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = NeonCyan)
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = if (activeVideoSource == VideoSource.ETHERNET_CAMERA) ActiveGreen else NeonCyan
+                )
             ) {
-                Text("TEST LINK", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                Text(if (activeVideoSource == VideoSource.ETHERNET_CAMERA) "ACTIVE" else "SWITCH / TEST", fontSize = 10.sp, fontWeight = FontWeight.Bold)
             }
         }
 
@@ -883,6 +943,7 @@ fun SettingsTab(
     var telemIp by remember { mutableStateOf(currentConfig.telemIp) }
     var telemPort by remember { mutableStateOf(currentConfig.telemPort.toString()) }
     var baudRate by remember { mutableStateOf(currentConfig.baudRate.toString()) }
+    var videoInput by remember { mutableStateOf(currentConfig.videoInputLink) }
     var videoOutput by remember { mutableStateOf(currentConfig.videoOutputLink) }
     var videoRes by remember { mutableStateOf(currentConfig.videoRes) }
 
@@ -940,10 +1001,53 @@ fun SettingsTab(
 
         Spacer(Modifier.height(10.dp))
 
+        Text("Camera Model Preset (1-Tap):", color = MutedText, fontSize = 11.sp)
+        Spacer(Modifier.height(4.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedButton(
+                onClick = { videoInput = "rtsp://192.168.144.108:554/stream=0" },
+                modifier = Modifier.weight(1f).height(38.dp),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    containerColor = if (videoInput.contains("192.168.144.108")) NeonCyan.copy(alpha = 0.15f) else Color.Transparent
+                ),
+                border = BorderStroke(1.dp, if (videoInput.contains("192.168.144.108")) NeonCyan else CardBorderColor),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Text("Skydroid C10", fontSize = 11.sp, color = if (videoInput.contains("192.168.144.108")) NeonCyan else LightText, fontWeight = FontWeight.Bold)
+            }
+            OutlinedButton(
+                onClick = { videoInput = "rtsp://192.168.144.25:8554/main.264" },
+                modifier = Modifier.weight(1f).height(38.dp),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    containerColor = if (videoInput.contains("192.168.144.25")) NeonCyan.copy(alpha = 0.15f) else Color.Transparent
+                ),
+                border = BorderStroke(1.dp, if (videoInput.contains("192.168.144.25")) NeonCyan else CardBorderColor),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Text("SIYI A2 / A8", fontSize = 11.sp, color = if (videoInput.contains("192.168.144.25")) NeonCyan else LightText, fontWeight = FontWeight.Bold)
+            }
+        }
+
+        Spacer(Modifier.height(6.dp))
+
+        OutlinedTextField(
+            value = videoInput,
+            onValueChange = { videoInput = it },
+            label = { Text("Ethernet Camera Input RTSP URL") },
+            placeholder = { Text("rtsp://192.168.144.108:554/stream=0", color = MutedText) },
+            modifier = Modifier.fillMaxWidth(),
+            colors = customFieldColors()
+        )
+
+        Spacer(Modifier.height(10.dp))
+
         OutlinedTextField(
             value = videoOutput,
             onValueChange = { videoOutput = it },
-            label = { Text("Video Output RTSP URL") },
+            label = { Text("Video Output RTSP URL (Cloud)") },
             modifier = Modifier.fillMaxWidth(),
             colors = customFieldColors()
         )
@@ -969,7 +1073,7 @@ fun SettingsTab(
                     droneConnectionType = currentConfig.droneConnectionType,
                     dronePort = currentConfig.dronePort,
                     baudRate = baudRate.toIntOrNull() ?: 115200,
-                    videoInputLink = currentConfig.videoInputLink,
+                    videoInputLink = videoInput.trim(),
                     videoOutputLink = videoOutput.trim(),
                     videoRes = videoRes.trim()
                 )

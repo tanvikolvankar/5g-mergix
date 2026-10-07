@@ -1,5 +1,6 @@
 package com.example.final_5gmergix
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,12 +8,15 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 
 class MergixForegroundService : Service() {
 
@@ -36,15 +40,27 @@ class MergixForegroundService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val notification = createNotification("5G MERGIX Background Service Active", "Video & Telemetry streams running")
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val serviceType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val hasCamera = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+                var serviceType = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    serviceType = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                    if (hasCamera) {
+                        serviceType = serviceType or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+                    }
+                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && hasCamera) {
+                    serviceType = ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                }
+                startForeground(notificationId, notification, serviceType)
             } else {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                startForeground(notificationId, notification)
             }
-            startForeground(notificationId, notification, serviceType)
-        } else {
-            startForeground(notificationId, notification)
+        } catch (e: Exception) {
+            Log.e("MergixService", "startForeground error: ${e.localizedMessage}")
+            try {
+                startForeground(notificationId, notification)
+            } catch (_: Exception) {}
         }
 
         return START_STICKY
