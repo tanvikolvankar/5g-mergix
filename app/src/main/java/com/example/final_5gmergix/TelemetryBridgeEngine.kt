@@ -109,7 +109,7 @@ class TelemetryBridgeEngine(private val context: Context) {
 
     // Config cache
     private var droneId = "ajay@1"
-    private var telemIp = "64.227.133.143"
+    private var telemIp = "YOUR_CLOUD_SERVER_IP"
     private var telemPort = 6666
     private var baudRate = 115200
 

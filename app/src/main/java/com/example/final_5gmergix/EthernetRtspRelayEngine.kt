@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * Connects to the local Ethernet camera (e.g., rtsp://192.168.144.108:554/stream=0),
  * negotiates SDP / RTSP transport, and transparently relays interleaved RTP H.264
- * packets over 5G to the cloud RTSP server (e.g., rtsp://64.227.133.143:8554/mystream1).
+ * packets over 5G to the cloud RTSP server (e.g., rtsp://YOUR_CLOUD_SERVER_IP:8554/mystream1).
  */
 class EthernetRtspRelayEngine(
     private val context: Context? = null,
@@ -138,7 +138,7 @@ class EthernetRtspRelayEngine(
             val inPort = if (inUri.port > 0) inUri.port else 554
 
             val outUri = URI(outputUrl)
-            val outHost = outUri.host ?: "64.227.133.143"
+            val outHost = outUri.host ?: "YOUR_CLOUD_SERVER_IP"
             val outPort = if (outUri.port > 0) outUri.port else 8554
 
             // 1. Connect to Camera (bound directly to USB Ethernet interface)

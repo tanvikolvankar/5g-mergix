@@ -82,7 +82,7 @@ class CameraStreamManager(
         }
     )
 
-    var defaultCloudRtspUrl = "rtsp://64.227.133.143:8554/mystream1"
+    var defaultCloudRtspUrl = "rtsp://YOUR_CLOUD_SERVER_IP:8554/mystream1"
     var defaultInputRtspUrl = "rtsp://192.168.144.25:8554/main.264"
     var streamWidth = 1280
     var streamHeight = 720

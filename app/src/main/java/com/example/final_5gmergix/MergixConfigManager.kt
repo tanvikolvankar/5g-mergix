@@ -52,26 +52,26 @@ class MergixConfigManager(private val context: Context) {
             }
             MergixConfig(
                 droneId = json.optString("drone_id", "ajay@1"),
-                telemIp = json.optString("telem_ip", "64.227.133.143"),
+                telemIp = json.optString("telem_ip", "YOUR_CLOUD_SERVER_IP"),
                 telemPort = json.optInt("telem_port", 6666),
                 droneConnectionType = json.optString("drone_connection_type", "serial"),
                 dronePort = json.optString("drone_port", "/dev/ttyAMA0"),
                 baudRate = json.optInt("baud_rate", 115200),
                 videoInputLink = inputLink,
-                videoOutputLink = json.optString("video_output_link", "rtsp://64.227.133.143:8554/mystream1"),
+                videoOutputLink = json.optString("video_output_link", "rtsp://YOUR_CLOUD_SERVER_IP:8554/mystream1"),
                 videoRes = json.optString("video_res", "1280:720")
             )
         } catch (e: Exception) {
             Log.e("MergixConfigManager", "Error loading config: ${e.localizedMessage}")
             MergixConfig(
                 droneId = "ajay@1",
-                telemIp = "64.227.133.143",
+                telemIp = "YOUR_CLOUD_SERVER_IP",
                 telemPort = 6666,
                 droneConnectionType = "serial",
                 dronePort = "/dev/ttyAMA0",
                 baudRate = 115200,
                 videoInputLink = "rtsp://192.168.144.108:554/stream=0",
-                videoOutputLink = "rtsp://64.227.133.143:8554/mystream1",
+                videoOutputLink = "rtsp://YOUR_CLOUD_SERVER_IP:8554/mystream1",
                 videoRes = "1280:720"
             )
         }

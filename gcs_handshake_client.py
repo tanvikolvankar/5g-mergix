@@ -5,6 +5,7 @@ connects to the spawned relay port, triggers 'START RELAY' on the drone,
 and creates a local TCP bridge on port 5760 for Mission Planner / QGroundControl.
 """
 
+import os
 import socket
 import json
 import time
@@ -12,7 +13,7 @@ import sys
 import threading
 import argparse
 
-DEFAULT_SERVER_IP = "64.227.133.143"
+DEFAULT_SERVER_IP = os.environ.get("MERGIX_SERVER_IP", "YOUR_CLOUD_SERVER_IP")
 APP_PORT = 7777
 LOCAL_GCS_PORT = 5760  # Port where Mission Planner connects locally
 
